@@ -151,7 +151,7 @@ class BluetoothScreen(Screen):
 
         except Exception as e:
             # Erro de conexão (dispositivo não está pronto, fora do alcance, etc.)
-            message = f"ERRO de Conexão. Tente Novamente ou Pareie o Dispositivo: {e}"
+            message = f"ERRO de Conexão. Tente Novamente ou \nPareie o Dispositivo: {e}"
             Clock.schedule_once(lambda dt: self.show_popup_message(message), 0)
             Clock.schedule_once(lambda dt: setattr(self, 'bluetooth_status', "Status: Falha na Conexão."), 0)
             try:
@@ -172,7 +172,7 @@ class BluetoothScreen(Screen):
             self.manager.current = 'motor_control'
         else:
             self.manager.current = 'motor_control'
-            self.show_popup_message("Conecte-se ao Bluetooth Antes de Avançar")
+            self.show_popup_message("Conecte-se ao Bluetooth \n Antes de Avançar")
 
 
     def show_popup_message(self, message):
@@ -350,42 +350,54 @@ class MotorControlScreen(Screen):
         """Função auxiliar para redefinir o foco de forma robusta."""
         input_widget.focus = True
 
-    # --------------------- Plota o Gráfico e Navega para Tela de Salvamento---------------------------
-    def go_to_save_screen(self):
-        """Abre o popup para coletar título e frequência antes de plotar."""
-
-        if len(powers) < 1:
-            message = f"Adicione ao Menos uma Medida\nde Potência para Salvar."
-            popup = ConfirmationPopup(message=message)
-            popup.open()
-            return
-        
-        # Abre o novo popup, passando a função que deve ser chamada após a confirmação
-        popup = PlotInputPopup(plot_action=self.plot_and_navigate)
-        popup.open()
-
-    def plot_and_navigate(self, graph_title, freq_text):
-        """Prepara o plot com o título e a legenda fornecidos e navega para a tela de salvamento."""
-
+    
+    # ------------------------ NOVA LÓGICA DE PLOTAGEM CENTRALIZADA ---------------------------
+    def _create_polar_plot(self, graph_title, freq_text, custom_scales, temp_path=None):
+        """Função auxiliar para criar o plot polar (usado por Save e Preview).
+           Se temp_path for fornecido, a figura é salva para preview.
+           Retorna a figura (plt.gcf())
+        """
         global reference_power 
-        reference_power = np.max(powers) # Cálculo da Potência de Referência (Potência Máxima)
+        
+        # O cálculo do Ganho Normalizado e o fechamento do loop são os mesmos
+        reference_power = np.max(powers) 
         angles_np = np.array(angles_deg) 
         powers_np = np.array(powers)
         angles_rad = np.deg2rad(angles_np)
-        
-        # Cálculo do Ganho Normalizado (em relação à Potência Máxima)
         gains_dB = powers_np - reference_power
         sorted_indices = np.argsort(angles_rad)
         angles_rad = angles_rad[sorted_indices]
         gains_dB = gains_dB[sorted_indices]
-
-        # Fecha o loop no gráfico polar
         angles_rad = np.append(angles_rad, angles_rad[0])
         gains_dB = np.append(gains_dB, gains_dB[0])
-
-        # Configuração dos Limites Radiais
-        min_gain = int(np.floor(np.min(gains_dB) / 5) * 5)
+        
+        # -------------------------------------------------------------------------
+        # Lógica de Definição das Escalas Radiais
+        # -------------------------------------------------------------------------
+        
+        # 1. Define o limite máximo (0 dB de ganho)
         max_gain = 0 
+        
+        if custom_scales:
+            # Opção Personalizada: Usa as escalas fornecidas pelo usuário
+            
+            # Filtra e adiciona 0 dB se necessário (para garantir que a borda externa seja 0dB)
+            if 0 not in custom_scales:
+                custom_scales.append(0.0)
+            
+            # Remove duplicatas e ordena da menor (mais negativa) para a maior (0)
+            radial_ticks = np.array(sorted(list(set(custom_scales))))
+            
+            # O limite mínimo (mais interno) do gráfico será a menor escala fornecida
+            min_gain = np.min(radial_ticks) 
+
+        else:
+            # Opção Automática (Padrão): Lógica original
+            min_data_gain = np.floor(np.min(gains_dB) / 5) * 5 # Mínimo automático, arredondado para o 5 mais próximo
+            min_gain = min_data_gain
+            radial_ticks = np.arange(min_gain, max_gain + 1, 5)
+
+        # -------------------------------------------------------------------------
 
         # Cria o Gráfico
         plt.figure(figsize=(8, 8))
@@ -407,20 +419,75 @@ class MotorControlScreen(Screen):
         ax.set_title(full_title, va='bottom', fontsize=16, y=1.08) 
         
         # Adiciona a Legenda (para o label definido no ax.plot)
-        ax.legend(loc='lower left', bbox_to_anchor=(0.95, 0.95), fontsize=14,borderaxespad=0.) 
+        ax.legend(loc='lower left', bbox_to_anchor=(0.9, 0.9), fontsize=14,borderaxespad=0.) 
         
         ax.set_theta_zero_location('S')
         ax.set_theta_direction(-1)
         ax.set_rlabel_position(135)
+        
+        # Aplica os limites e as escalas radiais (RTICKS)
         ax.set_rlim(min_gain, max_gain)
-        ax.set_rticks(np.arange(min_gain, max_gain + 1, 5))
+        ax.set_rticks(radial_ticks) # <--- APLICA AS ESCALAS AQUI
         ax.grid(True)
         
-        # Navega para a tela de salvamento
-        self.manager.current = 'save_file_screen'
+        # Se temp_path for fornecido, salva a figura para o preview
+        if temp_path:
+            fig = plt.gcf()
+            try:
+                fig.savefig(temp_path, format='png', dpi=150)
+                plt.close(fig)
+            except Exception as e:
+                self.manager.get_screen('bluetooth_connection').show_popup_message(f"Erro ao Salvar Figura Temporária: {e}")
+        
+        return plt.gcf()
+
+    def go_to_save_screen(self):
+        """Abre o popup para coletar título e frequência antes de plotar/salvar."""
+
+        if len(powers) < 1:
+            message = f"Adicione ao Menos uma Medida\nde Potência para Salvar."
+            popup = ConfirmationPopup(message=message)
+            popup.open()
+            return
+        
+        # Abre o novo popup para coletar todos os dados (título, freq, escalas)
+        popup = PlotInputPopup(plot_action=self.plot_and_navigate_or_preview)
+        popup.open()
+        
+    def preview_graph(self):
+        """Abre o popup de input para coletar dados (incluindo escalas) e gerar o preview."""
+        if len(powers) < 1:
+            message = "Adicione ao Menos uma Medida de Potência para Pré-Visualizar."
+            self.manager.get_screen('bluetooth_connection').show_popup_message(message)
+            return
+
+        # Abre o popup, a ação de plotagem será definida no popup
+        popup = PlotInputPopup(plot_action=self.plot_and_navigate_or_preview)
+        popup.open()
+
+    def plot_and_navigate_or_preview(self, graph_title, freq_text, custom_scales, mode):
+        """Função central que orquestra a criação do gráfico e decide a ação (Save ou Preview)."""
+
+        if mode == 'preview':
+            temp_path = os.path.join(App.get_running_app().user_data_dir, "temp_graph.png")
+            self._create_polar_plot(graph_title, freq_text, custom_scales, temp_path=temp_path)
+            
+            # Exibe o Popup de Visualização
+            popup = GraphViewerPopup(image_path=temp_path)
+            popup.open()
+            
+        elif mode == 'save':
+            # Cria o plot em memória (sem salvar arquivo temporário)
+            self._create_polar_plot(graph_title, freq_text, custom_scales) 
+            
+            # Navega para a tela de salvamento
+            self.manager.current = 'save_file_screen'
+            
+        else:
+            self.manager.get_screen('bluetooth_connection').show_popup_message("Erro no modo de plotagem.")
 
     def _perform_save(self, path, filename):
-        """Salva a figura no caminho e nome de arquivo especificados."""
+        """Salva a figura no caminho e nome de arquivo especificados. (Sem alteração no corpo)"""
         try:
             fig = plt.gcf()
             if not filename.lower().endswith(('.png', '.pdf')):
@@ -431,18 +498,18 @@ class MotorControlScreen(Screen):
             folder_name = os.path.basename(path)
             
             fig.savefig(filepath, format=file_format, dpi=300 if file_format == 'png' else None) # Salva o arquivo
-            message = f"Arquivo Salvo com sucesso em:\n[Pasta] {folder_name}\n[Nome] {filename}"
+            message = f"Arquivo Salvo com sucesso em:\n Pasta: {folder_name}\nNome:  {filename}"
             popup = ConfirmationPopup(message=message)
             popup.open()
             plt.close(fig) # A figura deve ser fechada para funcionar bem no Android
             
         except Exception as e:
-            message = f"ERRO ao Salvar o Arquivo.\n Tente novamente ou Verifique as Permissões: {e}"
+            message = f"Erro ao Salvar o Arquivo.\n Tente novamente ou Verifique as Permissões: {e}"
             popup = ConfirmationPopup(message=message)
             popup.open()
             
         self.manager.current = 'motor_control' # Volta a tela
-
+        
     #---------------- Limpar Dados e Iniciar Novo Gráfico ------------------ 
     def limpa_dados(self):
         """Abre o popup de confirmação antes de limpar os dados."""
@@ -473,55 +540,8 @@ class MotorControlScreen(Screen):
         popup_success = ConfirmationPopup(message=message) 
         popup_success.open()
         
-    def preview_graph(self):
-        """Salva o gráfico em um arquivo temporário e o exibe em um popup Kivy."""
-        global powers
-        global reference_power
-        
-        if len(powers) < 1:
-            message = "Adicione ao Menos uma Medida de Potência para Pré-Visualizar."
-            self.manager.get_screen('bluetooth_connection').show_popup_message(message)
-            return
-        
-        reference_power = np.max(powers) 
-        angles_np = np.array(angles_deg) 
-        powers_np = np.array(powers)
-        angles_rad = np.deg2rad(angles_np)
-        gains_dB = powers_np - reference_power
-        sorted_indices = np.argsort(angles_rad)
-        angles_rad = angles_rad[sorted_indices]
-        gains_dB = gains_dB[sorted_indices]
-        angles_rad = np.append(angles_rad, angles_rad[0])
-        gains_dB = np.append(gains_dB, gains_dB[0])
-
-        min_gain = int(np.floor(np.min(gains_dB) / 5) * 5)
-        max_gain = 0 
-        
-        
-        fig = plt.figure(figsize=(8, 8))
-        ax = fig.add_subplot(111, polar=True) 
-        ax.plot( angles_rad,gains_dB,marker='o', linestyle='-', color='#087e9e')
-        ax.fill(angles_rad, gains_dB, alpha=0.2, color='#087e9e')
-        full_title = f"Diagrama de Radiação"
-        ax.set_title(full_title, va='bottom', fontsize=16, y=1.08) 
-        
-        ax.set_theta_zero_location('S')
-        ax.set_theta_direction(-1)
-        ax.set_rlabel_position(135)
-        ax.set_rlim(min_gain, max_gain)
-        ax.set_rticks(np.arange(min_gain, max_gain + 1, 5))
-        ax.grid(True)
-        temp_path = os.path.join(App.get_running_app().user_data_dir, "temp_graph.png")
-        
-        try:
-            fig.savefig(temp_path, format='png', dpi=150)
-            plt.close(fig)
-            popup = GraphViewerPopup(image_path=temp_path)
-            popup.open()
-            
-        except Exception as e:
-            self.manager.get_screen('bluetooth_connection').show_popup_message(f"ERRO ao Gerar Preview: {e}")
-            
+    # A função preview_graph original foi substituída e modificada para abrir o PlotInputPopup.
+    # O código antigo da preview_graph foi movido para _create_polar_plot e plot_and_navigate_or_preview.
 
         
 # -----------------------------------------------------------------------------------------------------------------------------------
@@ -591,17 +611,18 @@ class ConfirmationDeletePopup(Popup):
         self.dismiss()
 
 class PlotInputPopup(Popup):
-    """Popup para capturar o título do gráfico e a frequência."""
+    """Popup para capturar o título do gráfico, a frequência e as escalas radiais personalizadas."""
  
     plot_action = ObjectProperty(None) 
     
-    def __init__(self, **kwargs):
+    def __init__(self, plot_action, **kwargs):
         super().__init__(**kwargs)
+        self.plot_action = plot_action
         self.title = 'DETALHES DO GRÁFICO'
-        self.size_hint = (0.7, 0.5)
+        self.size_hint = (0.8, 0.6) # Aumentado para acomodar o novo campo
         self.auto_dismiss = False
         
-        # Cria os TextInputs para que o método on_confirm possa acessá-los
+        # Cria os TextInputs
         self.title_input = TextInput(
             hint_text='Título do Gráfico', 
             multiline=False, 
@@ -610,6 +631,13 @@ class PlotInputPopup(Popup):
         )
         self.freq_input = TextInput(
             hint_text='Frequência (ex: 2.45 GHz)', 
+            multiline=False, 
+            size_hint_y=None, 
+            height=dp(40)
+        )
+        # Novo campo para escalas radiais
+        self.scale_input = TextInput(
+            hint_text='Ex: 0, -3, -5, -10, (Separe com vírgulas)', 
             multiline=False, 
             size_hint_y=None, 
             height=dp(40)
@@ -623,27 +651,67 @@ class PlotInputPopup(Popup):
         content_layout.add_widget(Label(text="Frequência para Legenda:"))
         content_layout.add_widget(self.freq_input)
         
+        # Novo campo de Escalas Radiais
+        content_layout.add_widget(Label(text="Escalas Radiais (dB):"))
+        content_layout.add_widget(self.scale_input)
+        
         # Botões
         button_layout = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(40))
-        btn_confirm = Button(text='Plotar e Salvar', on_release=self.on_confirm)
-        btn_cancel = Button(text='Cancelar', on_release=self.dismiss)
+        
+        # Botão para Pré-Visualização
+        btn_preview = Button(
+            text='Visualizar', 
+            on_release=lambda instance: self.on_confirm(instance, mode='preview')
+        )
+        # Botão para Plotar e Salvar
+        btn_confirm = Button(
+            text='Salvar', 
+            on_release=lambda instance: self.on_confirm(instance, mode='save')
+        )
+        
+        btn_cancel = Button(text='Voltar', on_release=self.dismiss)
+        
+        button_layout.add_widget(btn_preview)
         button_layout.add_widget(btn_confirm)
         button_layout.add_widget(btn_cancel)
         
         content_layout.add_widget(button_layout)
         self.content = content_layout
 
-    def on_confirm(self, instance):
+    def on_confirm(self, instance, mode):
         """Passa os dados inseridos para a função de plotagem e fecha o popup."""
         graph_title = self.title_input.text if self.title_input.text else "Diagrama de Radiação"
         freq_text = self.freq_input.text if self.freq_input.text else " "
         
+        # Processa as escalas inseridas
+        scale_text = self.scale_input.text.replace(' ', '')
+        custom_scales = []
+        
+        try:
+            if scale_text:
+                # Converte e garante que são números <= 0 (ganho relativo)
+                parsed_scales = [float(s) for s in scale_text.split(',') if s.strip()]
+                
+                # Filtra para garantir que são números razoáveis (ex: <= 0)
+                custom_scales = [s for s in parsed_scales if s <= 0]
+                
+                # Opcional: Limita a 4 (ou mais, dependendo da necessidade, mas o Matplotlib aceita quantos forem)
+                # O importante é que a ordenação e o limite sejam tratados na função de plotagem
+                custom_scales = list(set(custom_scales)) # Remove duplicatas
+                
+        except ValueError:
+             # Se a conversão falhar, exibe uma mensagem e não usa escalas personalizadas
+             popup = ConfirmationPopup(message="Erro no formato das escalas.\nUsando escala automática.")
+             popup.open()
+             custom_scales = []
+
         if self.plot_action:
-            self.plot_action(graph_title, freq_text) 
+            # Chama a função de plotagem com o novo parâmetro e o modo
+            self.plot_action(graph_title, freq_text, custom_scales, mode) 
         self.dismiss()
     
 
-# Sua classe GraphViewerPopup atual:
+# Sua classe GraphViewerPopup (sem alterações, apenas movida para manter a ordem)
 class GraphViewerPopup(Popup):
     """Exibe o gráfico salvo temporariamente, força a atualização e inclui o botão Fechar."""
     def __init__(self, image_path, **kwargs):
