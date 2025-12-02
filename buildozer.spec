@@ -15,18 +15,18 @@ source.dir = .
 # (list) Source files to include (let empty to include all the files)
 source.include_exts = py,png,jpg,kv,atlas
 
-# (str) Application versioning (method 1)
+# (str) Application versioning (method 1
 version = 0.1
 
 # (list) Application requirements
 # Versões específicas para evitar conflitos
-requirements = python3==3.10.14,kivy==2.3.0,setuptools,pillow,pyjnius
+requirements = python3,kivy==2.2.1,numpy==1.23.5,matplotlib,setuptools,pillow,pyjnius,requests
 
 # (str) Presplash of the application
 #presplash.filename = %(source.dir)s/Splash.png
 
 # (str) Icon of the application
-#icon.filename = %(source.dir)s/Icon.png
+icon.filename = icone.png
 
 # (list) Supported orientations
 orientation = portrait
